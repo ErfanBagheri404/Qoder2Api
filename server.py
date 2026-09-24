@@ -198,6 +198,27 @@ class Handler(BaseHTTPRequestHandler):
         elif "tools" in body:
             body.pop("tools")
 
+        # Upstream gateway rejects bodies over 256KB with a bare 500
+        # (measured: 272861B fails, 262144 = 256*1024 is the line).
+        # Long agent sessions exceed this, so drop the oldest turns until
+        # the body fits. 240KB ceiling leaves headroom for JSON variance;
+        # system prompt and newest turns always survive.
+        dropped = 0
+        while len(json.dumps(body, ensure_ascii=False).encode("utf-8")) > 245760:
+            idx = next((i for i, m in enumerate(body["messages"])
+                        if m.get("role") != "system"), None)
+            if idx is None or len(body["messages"]) <= 2:
+                break
+            body["messages"].pop(idx)
+            dropped += 1
+            # An assistant turn that requested a tool leaves an orphaned
+            # "Tool result:" user turn behind; drop it too.
+            if (idx < len(body["messages"])
+                    and str(body["messages"][idx].get("content", "")).startswith("Tool result:")):
+                body["messages"].pop(idx)
+                dropped += 1
+        trimmed_note = f" trimmed={dropped}" if dropped else ""
+
         cid = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
         self._model = body["model"]
@@ -205,7 +226,9 @@ class Handler(BaseHTTPRequestHandler):
         self._log(time.strftime("%H:%M:%S"),
                   "req model=", req.get("model"), "->", body["model"],
                   "stream=", want_stream, "tools=", len(req.get("tools") or []),
-                  "msgs=", len(msgs))
+                  "msgs=", len(msgs),
+                  "bytes=", len(json.dumps(body, ensure_ascii=False)),
+                  trimmed_note)
         try:
             resp = client.post_chat(body, timeout=300)
         except Exception as e:
