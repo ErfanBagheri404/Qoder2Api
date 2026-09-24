@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+server.log
+.qoder2api-machine-id
+dist/
+build/
+*.spec
