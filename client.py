@@ -30,13 +30,16 @@ import threading
 _local = threading.local()
 
 
+def _host():
+    return API_HOST.split("//", 1)[-1]
+
+
 def _connection():
     """Return this thread's keep-alive connection, reconnecting when stale."""
     import http.client
     conn = getattr(_local, "conn", None)
     if conn is None:
-        host = API_HOST.split("//", 1)[-1]
-        conn = http.client.HTTPSConnection(host, timeout=300)
+        conn = http.client.HTTPSConnection(_host(), timeout=300)
         _local.conn = conn
     return conn
 
@@ -138,11 +141,12 @@ def _auth_header(tok=None):
     return {"Authorization": "Bearer " + t}
 
 
-def post_chat(body, tok=None, timeout=300, retries=2):
-    """POST to the direct chat endpoint over keep-alive; retries 5xx.
+def post_chat(body, tok=None, timeout=300, retries=3):
+    """POST to the direct chat endpoint; retries transient upstream failures.
 
-    The gateway intermittently returns bare 500s; a short backoff retry
-    recovers most of them without the client ever seeing an error.
+    Streams always get a fresh socket: a long stream leaves the keep-alive
+    socket dead server-side, and reusing it fails with an SSL EOF.
+    Non-stream calls reuse the connection (saves ~1-3s of TLS).
     """
     import http.client
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -151,15 +155,19 @@ def post_chat(body, tok=None, timeout=300, retries=2):
     headers["Accept"] = "text/event-stream" if body.get("stream") \
         else "application/json"
     headers["User-Agent"] = UA
+    streaming = bool(body.get("stream"))
     last = None
     for attempt in range(max(1, retries)):
         try:
-            conn = _connection()
-            conn.timeout = timeout
+            if streaming:
+                conn = http.client.HTTPSConnection(_host(), timeout=timeout)
+            else:
+                conn = _connection()
+                conn.timeout = timeout
             conn.request("POST", CHAT_PATH, body=data, headers=headers)
             resp = conn.getresponse()
         except (http.client.HTTPException, OSError) as e:
-            _drop_connection()  # stale keep-alive: rebuild and retry
+            _drop_connection()  # stale socket: rebuild and retry
             last = e
             if attempt < retries - 1:
                 time.sleep(1.5)
@@ -167,7 +175,10 @@ def post_chat(body, tok=None, timeout=300, retries=2):
             raise RuntimeError(f"upstream connection failed: {e}") from e
         if resp.status in (500, 502, 503, 504) and attempt < retries - 1:
             # The gateway intermittently returns bare 500s; reconnect and retry.
-            last = RuntimeError(f"HTTP {resp.status}: {resp.read(200)!r}")
+            try:
+                last = RuntimeError(f"HTTP {resp.status}: {resp.read(200)!r}")
+            except Exception:
+                pass
             _drop_connection()
             time.sleep(2 + attempt * 3)
             continue
