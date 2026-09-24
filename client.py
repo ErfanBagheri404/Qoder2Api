@@ -22,6 +22,34 @@ QUOTA_URL = "https://openapi.qoder.sh/api/v2/quota/usage"
 
 UA = "Qoder/1.1.61 (Windows; x64) node/20"
 
+# Reused keep-alive connections. urllib opens a fresh TLS session per call,
+# which costs 1-3s of the request budget. Thread-local: the proxy is threaded
+# and two requests must never share a socket.
+import threading
+
+_local = threading.local()
+
+
+def _connection():
+    """Return this thread's keep-alive connection, reconnecting when stale."""
+    import http.client
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        host = API_HOST.split("//", 1)[-1]
+        conn = http.client.HTTPSConnection(host, timeout=300)
+        _local.conn = conn
+    return conn
+
+
+def _drop_connection():
+    conn = getattr(_local, "conn", None)
+    _local.conn = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 # Model ids accepted by the direct endpoint, verified live.
 MODELS = {
     "qwen3.8-flash": "qwen-flash",   # Qwen3.8-Flash; provider qwen3.5-flash
@@ -41,11 +69,13 @@ def resolve_model(name):
         return MODELS[DEFAULT_MODEL]
     n = name.strip()
     low = n.lower()
+    # strip 9router-style prefixes: qoderdesk/qwen3.8-flash -> qwen3.8-flash
+    low = low.rsplit("/", 1)[-1]
     if low in MODELS:
         return MODELS[low]
     if low in PASSTHROUGH:
         return low
-    return n
+    return low
 
 
 def token(state=None):
@@ -108,17 +138,44 @@ def _auth_header(tok=None):
     return {"Authorization": "Bearer " + t}
 
 
-def post_chat(body, tok=None, timeout=300):
-    """POST to the direct chat endpoint; returns the open HTTP response."""
+def post_chat(body, tok=None, timeout=300, retries=2):
+    """POST to the direct chat endpoint over keep-alive; retries 5xx.
+
+    The gateway intermittently returns bare 500s; a short backoff retry
+    recovers most of them without the client ever seeing an error.
+    """
+    import http.client
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(API_HOST + CHAT_PATH, data=data, method="POST")
-    for k, v in _auth_header(tok).items():
-        req.add_header(k, v)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "text/event-stream" if body.get("stream")
-                   else "application/json")
-    req.add_header("User-Agent", UA)
-    return urllib.request.urlopen(req, timeout=timeout)
+    headers = _auth_header(tok)
+    headers["Content-Type"] = "application/json"
+    headers["Accept"] = "text/event-stream" if body.get("stream") \
+        else "application/json"
+    headers["User-Agent"] = UA
+    last = None
+    for attempt in range(max(1, retries)):
+        try:
+            conn = _connection()
+            conn.timeout = timeout
+            conn.request("POST", CHAT_PATH, body=data, headers=headers)
+            resp = conn.getresponse()
+        except (http.client.HTTPException, OSError) as e:
+            _drop_connection()  # stale keep-alive: rebuild and retry
+            last = e
+            if attempt < retries - 1:
+                time.sleep(1.5)
+                continue
+            raise RuntimeError(f"upstream connection failed: {e}") from e
+        if resp.status in (500, 502, 503, 504) and attempt < retries - 1:
+            # The gateway intermittently returns bare 500s; reconnect and retry.
+            last = RuntimeError(f"HTTP {resp.status}: {resp.read(200)!r}")
+            _drop_connection()
+            time.sleep(2 + attempt * 3)
+            continue
+        if resp.status >= 400:
+            raw = resp.read(400).decode("utf-8", "replace")
+            raise RuntimeError(f"HTTP {resp.status}: {raw[:300]}")
+        return resp
+    raise RuntimeError(f"upstream failed after {retries} attempts: {last}")
 
 
 def get_json(url, tok=None, timeout=30):
