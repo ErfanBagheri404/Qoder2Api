@@ -11,6 +11,7 @@ import auth
 import client
 
 PORT = 61025
+_server_api_key = None
 
 # Fields the caller may set; everything else is stripped to avoid
 # upstream-specific validation errors.
@@ -70,6 +71,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _auth_ok(self):
+        if not _server_api_key:
+            return True
+        got = self.headers.get("authorization", "")
+        return got.replace("Bearer ", "", 1).strip() == _server_api_key
+
     def _json(self, status, obj):
         body = json.dumps(obj).encode()
         self.send_response(status)
@@ -88,6 +95,8 @@ class Handler(BaseHTTPRequestHandler):
             s = auth.load_auth()
             return self._json(200, {"ok": bool(s and s.get("token"))})
         if path == "/v1/models":
+            if not self._auth_ok():
+                return self._err(401, "bad api key", "invalid_api_key")
             created = int(time.time())
             data = [{"id": k, "object": "model", "created": created,
                      "owned_by": "qoder"} for k in client.MODELS]
@@ -129,6 +138,8 @@ class Handler(BaseHTTPRequestHandler):
         if path != "/v1/chat/completions":
             return self._json(404, {"error": {"message": "unknown path",
                                               "type": "not_found"}})
+        if not self._auth_ok():
+            return self._err(401, "bad api key", "invalid_api_key")
 
         try:
             n = int(self.headers.get("content-length", 0))
@@ -277,9 +288,15 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def main(port=PORT):
-    srv = Server(("127.0.0.1", port), Handler)
-    print(f"Qoder2API on http://127.0.0.1:{port}/v1")
+def start_server(host, port, api_key=None):
+    global _server_api_key
+    _server_api_key = api_key
+    return Server((host, port), Handler)
+
+
+def main(port=PORT, host="127.0.0.1"):
+    srv = start_server(host, port)
+    print(f"Qoder2API on http://{host}:{port}/v1")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
