@@ -27,16 +27,38 @@ def check(name, cond, detail=""):
 def main():
     print("Qoder2API selfcheck")
 
-    # --- model mapping ---
-    check("qwen3.8-flash -> qwen-flash",
-          client.resolve_model("qwen3.8-flash") == "qwen-flash")
-    check("case-insensitive",
-          client.resolve_model("QWEN3.8-FLASH") == "qwen-flash")
-    check("upstream id passthrough", client.resolve_model("qmodel") == "qmodel")
-    check("empty -> default",
-          client.resolve_model("") == client.MODELS[client.DEFAULT_MODEL])
+    # --- model mapping (catalog seeded: this suite must stay offline) ---
+    import time
+    client._catalog.update(at=time.time(), rows=client.catalog_rows_to_models([
+        {"enable": True, "key": "qfmodel", "display_name": "Qwen3.8-Flash",
+         "is_vl": True, "is_reasoning": True, "is_default": True},
+        {"enable": False, "key": "gmodel", "display_name": "GLM-5.3"},
+        {"enable": True, "key": "dfmodel", "display_name": "DeepSeek-Flash"},
+    ]))
+    check("catalog drops disabled rows", len(client.fetch_models()) == 2)
+    check("catalog id is lowercased name",
+          client.fetch_models()[0]["id"] == "qwen3.8-flash")
+    check("catalog resolves to live key",
+          client.resolve_model("qwen3.8-flash") == "qfmodel")
+    check("catalog default model", client.default_model() == "qfmodel")
+    check("catalog case-insensitive",
+          client.resolve_model("QWEN3.8-FLASH") == "qfmodel")
+    check("catalog 9router prefix",
+          client.resolve_model("qoderdesk/Qwen3.8-Flash") == "qfmodel")
     check("unknown passthrough",
           client.resolve_model("some-new-model") == "some-new-model")
+    check("empty -> catalog default", client.resolve_model("") == "qfmodel")
+
+    # --- static fallback when the catalog is unreachable ---
+    client._catalog.update(at=time.time(), rows=None)
+    check("fallback static map",
+          client.resolve_model("qwen3.8-flash") == "qwen-flash")
+    check("fallback empty -> default",
+          client.resolve_model("") == client.MODELS[client.DEFAULT_MODEL])
+    check("fallback upstream id passthrough",
+          client.resolve_model("qmodel") == "qmodel")
+    check("negative cache: no refetch inside TTL", client.fetch_models() is None)
+    client._catalog.update(at=0.0, rows=None)  # later code may fetch for real
 
     # --- content flattening ---
     check("string content", server._flatten_content("hi") == "hi")

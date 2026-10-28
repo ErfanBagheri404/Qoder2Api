@@ -6,17 +6,35 @@ Upstream: `https://api2-v2.qoder.sh/model/v1/chat/completions` (plain OpenAI for
 
 This is an open-source community project, not affiliated with Qoder.
 
-## Verified models
+## Models (dynamic)
+
+`GET /v1/models` and model resolution fetch the **live catalog** of your
+account (`https://api3.qoder.sh/algo/api/v2/model/list?Encode=1`, COSY
+signed like the desktop app), cached for 10 minutes. Disabled/premium
+models your plan can't use are filtered out; only usable models appear.
+
+Current list for a Free account:
 
 | Proxy id | Upstream id | Notes |
 |---|---|---|
-| `qwen3.8-flash` (default) | `qwen-flash` | **Free** — zero credit usage, verified live |
+| `qwen3.8-flash` (default) | `qfmodel` | **Free** — zero credit usage |
+| `deepseek-flash` | `dfmodel` | **Free** — zero credit usage |
+
+If upstream adds or removes models, the proxy picks it up with zero code
+changes. New plan also unlocks more models there automatically. The
+legacy static map below is only a fallback when the catalog is
+unreachable:
+
+| Static fallback | Upstream id | Notes |
+|---|---|---|
+| `qwen3.8-flash` | `qwen-flash` | older catalog key, still accepted |
 | `qwen3.7-plus` | `qmodel` | trial credits |
 | `kimi-k2.7-code` | `kmodel` | trial credits |
 | `deepseek-v4-pro` | `dmodel` | trial credits |
 | `minimax-m2.5` | `mmodel` | trial credits |
 
-Upstream ids (`qwen-flash`, `qmodel`, …) also work directly. Unknown ids pass through.
+Upstream ids (`qfmodel`, `dfmodel`, `qwen-flash`, `qmodel`, …) also pass
+through directly, so do unknown ids.
 
 ## Quick start
 
@@ -51,7 +69,7 @@ Token is stored in `~/.qoder2api-auth.json` (never commit it). Refresh is automa
 ## Endpoints
 
 - `POST /v1/chat/completions` — OpenAI chat, stream + non-stream, tools
-- `GET /v1/models` — proxy model list
+- `GET /v1/models` — live model catalog (COSY-signed upstream fetch, 10 min cache; static fallback offline)
 - `GET /v1/plan` — account plan
 - `GET /v1/quota` — credit balances (the free model never decrements these)
 - `GET /healthz` — `{"ok": true}` when logged in
@@ -63,6 +81,7 @@ Add a connection: base URL `http://127.0.0.1:61025/v1`, model `qwen3.8-flash` (o
 
 ## Notes
 
+- The model list endpoint above IS the COSY-signed path (`cosy.py` implements RSA + AES-128-CBC + MD5 envelope). Chat still uses the direct quick endpoint — no COSY per request.
 - The app's agent endpoint (`agent_chat_generation`) needs a COSY signed envelope and is slow (~19s first frame). This proxy uses the direct model endpoint instead — first frame in ~5-12s.
 - `reasoning_content` in deltas is passed through; clients that ignore unknown delta fields are unaffected.
 - `role: tool` messages are folded into `user` turns (`Tool result: ...`) since upstream has no tool role.

@@ -111,8 +111,18 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_ok():
                 return self._err(401, "bad api key", "invalid_api_key")
             created = int(time.time())
-            data = [{"id": k, "object": "model", "created": created,
-                     "owned_by": "qoder"} for k in client.MODELS]
+            try:
+                cat = client.fetch_models()
+            except Exception:
+                cat = None  # network down -> static fallback, never fake
+            if cat:
+                data = [{"id": m["id"], "object": "model", "created": created,
+                         "owned_by": "qoder", "upstream": m["key"],
+                         "vision": m["vl"], "reasoning": m["reasoning"]}
+                        for m in cat]
+            else:
+                data = [{"id": k, "object": "model", "created": created,
+                         "owned_by": "qoder"} for k in client.MODELS]
             return self._json(200, {"object": "list", "data": data})
         if path == "/v1/plan":
             try:

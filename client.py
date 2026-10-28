@@ -67,18 +67,95 @@ DEFAULT_MODEL = "qwen3.8-flash"
 PASSTHROUGH = {"qwen-flash", "qmodel", "kmodel", "dmodel", "mmodel"}
 
 
+import cosy
+
+MODEL_LIST_URL = "https://api3.qoder.sh/algo/api/v2/model/list?Encode=1"
+CATALOG_TTL = 600  # seconds; upstream changes land within this window
+_catalog = {"at": 0.0, "rows": None}
+
+
+def catalog_rows_to_models(rows):
+    """Pure: upstream chat-scene rows -> [{id, key, name, ...}], enabled only."""
+    out = []
+    for r in rows or []:
+        name = (r.get("display_name") or "").strip()
+        key = r.get("key")
+        if not r.get("enable") or not name or not key:
+            continue
+        out.append({
+            "id": name.strip().lower(),
+            "key": key,
+            "name": r["display_name"],
+            "vl": bool(r.get("is_vl")),
+            "reasoning": bool(r.get("is_reasoning")),
+            "price_factor": r.get("price_factor"),
+            "is_default": bool(r.get("is_default")),
+        })
+    return out
+
+
+def fetch_models(force=False):
+    """Live chat-model catalog for this account, COSY-signed, TTL-cached.
+
+    Returns [{id, key, name, vl, reasoning, price_factor}] or the last good
+    list (or None on first failure). Never fabricates: a failed fetch never
+    produces a fake list, the caller falls back to the static map.
+    """
+    now = time.time()
+    # TTL covers failures too, so one dead network never hammers upstream.
+    if not force and now - _catalog["at"] < CATALOG_TTL:
+        return _catalog["rows"]
+    _catalog["at"] = now
+    s = load_auth() or {}
+    tok = token(s)
+    if not tok:
+        return _catalog["rows"]
+    uid = s.get("uid") or ""
+    if not uid:
+        try:
+            uid = (userinfo() or {}).get("id") or ""
+        except Exception:
+            uid = ""
+    if not uid:
+        return _catalog["rows"]
+    import urllib.request
+    req = urllib.request.Request(MODEL_LIST_URL, method="GET")
+    for k, v in cosy.sign_headers(MODEL_LIST_URL, uid, tok,
+                                  machine_id=_machine_id()).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return _catalog["rows"]  # stale beats nothing; never fake
+    out = catalog_rows_to_models(data.get("chat"))
+    _catalog.update(at=now, rows=out or None)
+    return _catalog["rows"]
+
+
 def resolve_model(name):
     if not name:
-        return MODELS[DEFAULT_MODEL]
+        return default_model()
     n = name.strip()
     low = n.lower()
     # strip 9router-style prefixes: qoderdesk/qwen3.8-flash -> qwen3.8-flash
     low = low.rsplit("/", 1)[-1]
+    # live catalog first: new upstream models work with zero code changes
+    for m in fetch_models() or []:
+        if m["id"] == low:
+            return m["key"]
     if low in MODELS:
         return MODELS[low]
     if low in PASSTHROUGH:
         return low
     return low
+
+
+def default_model():
+    for m in fetch_models() or []:
+        if m["id"] == DEFAULT_MODEL:
+            return m["key"]
+    return MODELS[DEFAULT_MODEL]
 
 
 def token(state=None):

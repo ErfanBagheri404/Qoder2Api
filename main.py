@@ -87,7 +87,17 @@ def cmd_status():
 
 
 def cmd_models():
-    print(f"  {len(client.MODELS)} models:")
+    try:
+        cat = client.fetch_models(force=True)
+    except Exception:
+        cat = None
+    if cat:
+        print(f"  {len(cat)} models (live catalog):")
+        for m in cat:
+            tag = " [FREE]" if m["price_factor"] == 0 else ""
+            print(f"    - {m['id']} -> {m['key']}  ({m['name']}){tag}")
+        return
+    print(f"  {len(client.MODELS)} models (static fallback, catalog unreachable):")
     for k, up in client.MODELS.items():
         tag = " [FREE]" if k == "qwen3.8-flash" else ""
         print(f"    - {k} -> {up}{tag}")
